@@ -34,6 +34,7 @@ The primary design goal is to allow for the addition of new bot commands without
     ```
 ### Method 2 - Use prebuilt release
 1. Download the latest prebuilt JAR file from the [Releases](https://github.com/plavpixel/mycelium-bot/releases) page.
+Note that the packages in Releases will not always be up to date with the source code.
 ## Usage
 
 Execute the packaged JAR file from the `target/` directory:
