@@ -12,8 +12,7 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <!-- Use a known-stable artifact version from Maven Central -->
-        <graalvm.version>23.1.2</graalvm.version>
+        <graalvm.version>23.1.8</graalvm.version>
     </properties>
 
     <dependencies>
@@ -36,25 +35,38 @@
             <version>1.5.6</version>
         </dependency>
 
-        <!-- GraalVM Polyglot API (replaces graal-sdk) -->
+        <!-- GraalVM Polyglot API -->
         <dependency>
             <groupId>org.graalvm.polyglot</groupId>
             <artifactId>polyglot</artifactId>
             <version>${graalvm.version}</version>
         </dependency>
 
-        <!-- CORRECTED: GraalVM JavaScript Language Runtime -->
+        <!-- GraalVM JavaScript Language Runtime -->
         <dependency>
             <groupId>org.graalvm.polyglot</groupId>
             <artifactId>js</artifactId>
             <version>${graalvm.version}</version>
             <scope>runtime</scope>
-            <!-- FINAL FIX: Specify that this is a POM artifact -->
             <type>pom</type>
+        </dependency>
+
+        <!-- Jackson for parsing JSON metadata -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.17.0</version>
         </dependency>
     </dependencies>
 
     <build>
+        <!-- THIS 'RESOURCES' SECTION IS NEW -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
         <plugins>
             <!-- This plugin creates a single, executable JAR with all dependencies -->
             <plugin>
