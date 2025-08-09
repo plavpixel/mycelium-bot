@@ -6,21 +6,30 @@ import net.dv8tion.jda.api.JDABuilder;
 import net.dv8tion.jda.api.entities.Activity;
 import net.dv8tion.jda.api.requests.GatewayIntent;
 
+import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
 
 public class Main {
     public static void main(String[] args) throws InterruptedException {
+        // Check for and create the .env file if it's missing
+        checkForEnvFile();
+
         // Load environment variables from .env file
         Dotenv dotenv = Dotenv.load();
         String token = dotenv.get("DISCORD_TOKEN");
 
-        if (token == null) {
-            System.err.println("Error: DISCORD_TOKEN not found in .env file.");
+        // Check if the token is null or empty
+        if (token == null || token.trim().isEmpty()) {
+            System.err.println("############################################################");
+            System.err.println("## ERROR: DISCORD_TOKEN is missing from the .env file.  ##");
+            System.err.println("## Please add your bot token to the .env file and restart. ##");
+            System.err.println("############################################################");
             System.exit(1);
         }
 
-        // Initialize the ScriptManager
+        // Initialize the ScriptManager (this will also create the /scripts dir if needed)
         ScriptManager scriptManager = new ScriptManager();
         System.out.println("Loading scripts from ./scripts directory...");
         scriptManager.loadScripts();
@@ -36,11 +45,12 @@ public class Main {
         jda.awaitReady();
 
         // --- Startup Banner ---
-        String botVersion = getBotVersion(); // Dynamically get the version
+        String botVersion = getBotVersion();
         String javaVersion = System.getProperty("java.version");
         String javaVendor = System.getProperty("java.vendor");
 
         String asciiArt = """
+
                                    _ _
                                   | (_)
           _ __ ___  _   _  ___ ___| |_ _   _ _ __ ___
@@ -53,12 +63,30 @@ public class Main {
 
         System.out.println(asciiArt);
         System.out.println("-------------");
-        System.out.printf("Bot online version %s on %s %s%n", botVersion, javaVendor, javaVersion);
+        System.out.printf("Bot online %s on %s %s%n", botVersion, javaVendor, javaVersion);
         System.out.println("-------------");
 
 
         // Automatically register all commands found in the scripts directory
         CommandRegistry.registerCommands(jda);
+    }
+
+    /**
+     * Checks if a .env file exists in the project root. If not, it creates one.
+     */
+    private static void checkForEnvFile() {
+        File envFile = new File(".env");
+        if (!envFile.exists()) {
+            System.out.println("No .env file found. Creating an empty one for you.");
+            try {
+                if (envFile.createNewFile()) {
+                    System.out.println(".env file created successfully.");
+                }
+            } catch (IOException e) {
+                // If file creation fails, the subsequent token check will handle the error gracefully.
+                System.err.println("Warning: Could not create .env file: " + e.getMessage());
+            }
+        }
     }
 
     /**
