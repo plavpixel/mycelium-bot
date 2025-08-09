@@ -1,0 +1,39 @@
+# This workflow will build a Java project with Maven and cache dependencies to speed up future builds.
+
+name: Java CI with Maven
+
+# Controls when the workflow will run
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checks out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Set up GraalVM for JDK 21. This is the crucial step for your project.
+      - name: Set up GraalVM
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'graalvm'
+
+      # Step 3: Build with Maven. The -B flag is for non-interactive (batch) mode.
+      - name: Build with Maven
+        run: mvn -B package --file pom.xml
+
+      # Optional Step 4: If you want to create releases, you can add steps here to
+      # upload the JAR file as a build artifact.
+      # - name: Upload artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: mycelium-bot-jar
+      #     path: target/*.jar
