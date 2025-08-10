@@ -1,4 +1,3 @@
-# Maven build output
 target/
 pom.xml.tag
 pom.xml.releaseBackup
@@ -10,15 +9,18 @@ buildNumber.properties
 .mvn/timing.properties
 .mvn/wrapper/maven-wrapper.jar
 
-# IDE files
+
 .idea/
 *.iml
 *.iws
 .project
 .classpath
 .settings/
+.vscode/
+*.db
 
-# Log files
+config.json
+
 *.log
 logs/
 

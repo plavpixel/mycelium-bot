@@ -1,126 +1,250 @@
 package com.myceliumbot;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import net.dv8tion.jda.api.JDA;
+import net.dv8tion.jda.api.events.GenericEvent;
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
+import net.dv8tion.jda.api.interactions.commands.OptionType;
+import net.dv8tion.jda.api.interactions.commands.build.Commands;
+import net.dv8tion.jda.api.interactions.commands.build.OptionData;
+import net.dv8tion.jda.api.interactions.commands.build.SlashCommandData;
+import net.dv8tion.jda.api.interactions.commands.build.SubcommandData;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.HostAccess;
+import org.graalvm.polyglot.PolyglotException;
+import org.graalvm.polyglot.Source;
 import org.graalvm.polyglot.Value;
+import org.graalvm.polyglot.io.IOAccess;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class ScriptManager {
+    private final DatabaseManager dbManager;
+    private final HttpUtils httpUtils;
+    private Scheduler scheduler;
+    private final TimeUtils timeUtils;
+    private Context context;
+    private final Map<String, String> commandScripts = new HashMap<>();
+    private final Map<String, List<String>> eventHandlers = new HashMap<>();
+    private final File scriptsDirectory;
+    private final BotConfig config;
 
-    // Inner record to hold information about where to find a command's logic
-    private record ScriptExecutionInfo(File scriptFile, String handlerFunction) {}
-
-    private final Map<String, ScriptExecutionInfo> commandHandlers = new HashMap<>();
-    private final Context graalContext;
-    private final ScriptUtils scriptUtils;
-
-    public ScriptManager() {
-        this.scriptUtils = new ScriptUtils();
-        this.graalContext = Context.newBuilder("js")
-                .allowHostAccess(HostAccess.ALL)
-                .allowIO(true)
-                .build();
+    public ScriptManager(DatabaseManager dbManager, HttpUtils httpUtils) {
+        this.dbManager = dbManager;
+        this.httpUtils = httpUtils;
+        this.timeUtils = new TimeUtils();
+        this.config = BotConfig.getInstance();
+        this.scriptsDirectory = new File(config.getScriptsDirectory());
     }
 
-    public void loadScripts() {
-        File scriptDir = new File("scripts");
-        if (!scriptDir.exists() || !scriptDir.isDirectory()) {
-            System.err.println("Warning: 'scripts' directory not found. Creating it.");
-            scriptDir.mkdirs();
-            return;
+    public void setScheduler(Scheduler scheduler) {
+        this.scheduler = scheduler;
+    }
+
+    public List<SlashCommandData> loadScripts() {
+        commandScripts.clear();
+        eventHandlers.clear();
+        initializeContext();
+
+        List<SlashCommandData> foundCommands = new ArrayList<>();
+        File[] files = scriptsDirectory.listFiles((dir, name) -> name.endsWith(".js"));
+        if (files == null) {
+            System.out.println("Could not find scripts directory: " + scriptsDirectory.getPath());
+            return foundCommands;
         }
 
-        for (File file : Objects.requireNonNull(scriptDir.listFiles())) {
-            if (file.isFile() && file.getName().endsWith(".js")) {
-                try {
-                    String content = new String(Files.readAllBytes(file.toPath()));
-                    String metadataJson = extractMetadata(content);
-                    if (metadataJson != null) {
-                        parseAndMapHandlers(metadataJson, file);
+        System.out.println("Loading scripts and parsing metadata...");
+        Pattern pattern = Pattern.compile("/\\*\\*([\\s\\S]*?)\\*/");
+
+        for (File file : files) {
+            String scriptName = file.getName();
+            if (config.getDisabledScripts().contains(scriptName)) {
+                System.out.println("Skipping disabled script: " + scriptName);
+                continue;
+            }
+
+            try {
+                String scriptContent = Files.readString(file.toPath());
+                Matcher matcher = pattern.matcher(scriptContent);
+
+                if (matcher.find()) {
+                    String metadataBlock = matcher.group(1).trim();
+                    foundCommands.addAll(parseMetadata(metadataBlock, scriptName));
+                }
+
+                context.eval(Source.newBuilder("js", scriptContent, scriptName).build());
+            } catch (IOException | PolyglotException e) {
+                System.err.println("Failed to load script: " + scriptName + " - " + e.getMessage());
+                if (config.isDebugMode()) e.printStackTrace();
+            }
+        }
+        return foundCommands;
+    }
+
+    private List<SlashCommandData> parseMetadata(String json, String scriptName) {
+        List<SlashCommandData> commands = new ArrayList<>();
+        ObjectMapper mapper = new ObjectMapper();
+        try {
+            List<Map<String, Object>> definitions = mapper.readValue(json, new TypeReference<>() {});
+            for (Map<String, Object> def : definitions) {
+                if (def.containsKey("name") && def.containsKey("handler")) {
+                    String name = (String) def.get("name");
+                    String description = (String) def.get("description");
+                    SlashCommandData command = Commands.slash(name, description);
+
+                    if (def.containsKey("options")) {
+                        command.addOptions(parseOptions((List<Map<String, Object>>) def.get("options")));
                     }
-                } catch (IOException e) {
-                    System.err.println("Error reading script file: " + file.getName());
-                    e.printStackTrace();
+                    if (def.containsKey("subcommands")) {
+                        for (Map<String, Object> subMap : (List<Map<String, Object>>) def.get("subcommands")) {
+                            command.addSubcommands(new SubcommandData((String) subMap.get("name"), (String) subMap.get("description")));
+                        }
+                    }
+                    commands.add(command);
+                    commandScripts.put(name, scriptName);
+                } else if (def.containsKey("event") && def.containsKey("handler")) {
+                    String eventType = ((String) def.get("event")).toUpperCase(Locale.ROOT);
+                    eventHandlers.computeIfAbsent(eventType, k -> new ArrayList<>()).add((String) def.get("handler"));
                 }
             }
+        } catch (JsonProcessingException e) {
+            System.err.println("Error parsing metadata in " + scriptName + ": " + e.getMessage());
         }
+        System.out.printf(" + Parsed %d command(s) and %d event handler type(s) from '%s'.%n", commands.size(), eventHandlers.size(), scriptName);
+        return commands;
     }
 
-    private void parseAndMapHandlers(String json, File scriptFile) {
-        try {
-            ObjectMapper mapper = new ObjectMapper();
-            List<Map<String, Object>> commandList = mapper.readValue(json, new TypeReference<>() {});
-
-            for (Map<String, Object> commandMap : commandList) {
-                String commandName = (String) commandMap.get("name");
-                String handlerName = (String) commandMap.get("handler");
-
-                if (commandName != null && handlerName != null) {
-                    commandHandlers.put(commandName, new ScriptExecutionInfo(scriptFile, handlerName));
-                    System.out.println(" - Mapped command '/" + commandName + "' to handler '" + handlerName + "' in " + scriptFile.getName());
-                } else {
-                    System.err.println(" - WARNING: Command in " + scriptFile.getName() + " is missing 'name' or 'handler' property.");
-                }
+    private List<OptionData> parseOptions(List<Map<String, Object>> optionsList) {
+        List<OptionData> options = new ArrayList<>();
+        for (Map<String, Object> optMap : optionsList) {
+            try {
+                OptionType type = OptionType.valueOf(((String) optMap.get("type")).toUpperCase());
+                String name = (String) optMap.get("name");
+                String desc = (String) optMap.get("description");
+                boolean required = (boolean) optMap.getOrDefault("required", false);
+                options.add(new OptionData(type, name, desc, required));
+            } catch (Exception e) {
+                System.err.println("Failed to parse option: " + optMap.get("name"));
             }
-        } catch (Exception e) {
-            System.err.println("Failed to parse handler metadata for " + scriptFile.getName() + ": " + e.getMessage());
         }
+        return options;
     }
 
-    private String extractMetadata(String scriptContent) {
-        final String startTag = "/**";
-        final String endTag = "*/";
-        int startIndex = scriptContent.indexOf(startTag);
-        int endIndex = scriptContent.indexOf(endTag, startIndex);
-        return (startIndex != -1 && endIndex != -1) ? scriptContent.substring(startIndex + startTag.length(), endIndex).trim() : null;
-    }
-
-    public boolean hasScript(String commandName) {
-        return commandHandlers.containsKey(commandName);
-    }
-
-    public void executeScript(String commandName, SlashCommandInteractionEvent event) {
-        ScriptExecutionInfo info = commandHandlers.get(commandName);
-        if (info == null) {
-            event.getHook().sendMessage("Error: Could not find script execution info for command '" + commandName + "'.").queue();
+    // ... (The rest of your ScriptManager file remains the same)
+    public void handleCommand(SlashCommandInteractionEvent event) {
+        String commandName = event.getName();
+        String scriptName = commandScripts.get(commandName);
+        if (scriptName == null) {
+            event.getHook().sendMessage("Command script not found for: " + commandName).setEphemeral(true).queue();
             return;
         }
 
         try {
-            String scriptContent = new String(Files.readAllBytes(info.scriptFile().toPath()));
+            String handlerName = getHandlerForCommand(commandName);
+            if (handlerName == null) {
+                event.getHook().sendMessage("Handler name not found for command: " + commandName).setEphemeral(true).queue();
+                return;
+            }
 
-            // A fresh context for each execution to ensure isolation
-            try (Context isolatedContext = Context.newBuilder("js").allowHostAccess(HostAccess.ALL).build()) {
-                // Load the entire script file to define all functions
-                isolatedContext.eval("js", scriptContent);
+            Value handler = context.getBindings("js").getMember(handlerName);
+            if (handler == null || !handler.canExecute()) {
+                event.getHook().sendMessage("Handler function missing or invalid in script: " + handlerName).setEphemeral(true).queue();
+                return;
+            }
 
-                // Get the specific handler function
-                Value handler = isolatedContext.getBindings("js").getMember(info.handlerFunction());
-
-                if (handler == null || !handler.canExecute()) {
-                    String errorMsg = "Error: Handler function '" + info.handlerFunction() + "' not found or not executable in " + info.scriptFile().getName();
-                    System.err.println(errorMsg);
-                    event.getHook().sendMessage(errorMsg).queue();
-                    return;
+            ScriptUtils utils = new ScriptUtils();
+            try {
+                // Try calling with all the new tools first (for new scripts)
+                handler.execute(event, utils, dbManager, httpUtils, scheduler, timeUtils);
+            } catch (PolyglotException e) {
+                // If it's an argument count error, it's an old script. Fallback.
+                if (e.getMessage().contains("Invalid number of arguments")) {
+                    try {
+                        // Call with the old, simple signature
+                        handler.execute(event, utils);
+                    } catch (Exception inner) {
+                        event.getHook().sendMessage("Error executing command (fallback): " + inner.getMessage()).setEphemeral(true).queue();
+                        if (config.isDebugMode()) inner.printStackTrace();
+                    }
+                } else {
+                    // It's a different error, so re-throw it
+                    throw e;
                 }
-
-                // Execute the function, passing our API objects as arguments
-                handler.execute(event, this.scriptUtils);
             }
         } catch (Exception e) {
-            System.err.println("An error occurred while executing script: " + info.scriptFile().getName());
-            event.getHook().sendMessage("Error: An error occurred during script execution. Check console.").queue();
-            e.printStackTrace();
+            event.getHook().sendMessage("Error executing command: " + e.getMessage()).setEphemeral(true).queue();
+            if (config.isDebugMode()) e.printStackTrace();
         }
+    }
+
+    private String getHandlerForCommand(String commandName) {
+        String scriptName = commandScripts.get(commandName);
+        if (scriptName == null) return null;
+        try {
+            File scriptFile = new File(scriptsDirectory, scriptName);
+            String scriptContent = Files.readString(scriptFile.toPath());
+            Pattern pattern = Pattern.compile("/\\*\\*([\\s\\S]*?)\\*/");
+            Matcher matcher = pattern.matcher(scriptContent);
+            if (matcher.find()) {
+                String metadataBlock = matcher.group(1).trim();
+                JsonNode array = new ObjectMapper().readTree(metadataBlock);
+                for (JsonNode node : array) {
+                    if (node.has("name") && commandName.equals(node.get("name").asText())) {
+                        return node.get("handler").asText();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            if (config.isDebugMode()) e.printStackTrace();
+        }
+        return null;
+    }
+
+    public boolean hasEventHandler(String eventType) {
+        return eventHandlers.containsKey(eventType.toUpperCase(Locale.ROOT));
+    }
+
+    public void executeEventHandler(String eventType, GenericEvent event) {
+        List<String> handlers = eventHandlers.get(eventType.toUpperCase(Locale.ROOT));
+        if (handlers == null) return;
+        // This part can be expanded with the same fallback logic as handleCommand if needed
+        handlers.forEach(handlerName -> {
+            try {
+                context.getBindings("js").getMember(handlerName).execute(event, new ScriptUtils(), dbManager, httpUtils, scheduler, timeUtils);
+            } catch (Exception e) {
+                System.err.printf("Error in event handler %s: %s%n", handlerName, e.getMessage());
+            }
+        });
+    }
+
+    public void executeScheduledTask(String scriptFileName, String handlerName, JDA jda) {
+        // This part can also be expanded with the same fallback logic
+        try {
+            context.getBindings("js").getMember(handlerName).execute(jda, new ScriptUtils(), dbManager, httpUtils, scheduler, timeUtils);
+        } catch (Exception e) {
+            System.err.printf("Error in scheduled task %s: %s%n", handlerName, e.getMessage());
+        }
+    }
+
+    private void initializeContext() {
+        context = Context.newBuilder("js")
+                .allowHostAccess(HostAccess.ALL)
+                .allowHostClassLookup(s -> true)
+                .allowIO(IOAccess.ALL)
+                .allowAllAccess(config.isEnableJsConsoleAccess())
+                .option("js.ecmascript-version", "2022")
+                .build();
     }
 }
